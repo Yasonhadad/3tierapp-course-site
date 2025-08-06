@@ -1,0 +1,80 @@
+name: Build & Deploy Full-Stack to EC2
+
+on:
+  push:
+    branches: [ main ]        # שנה אם אתה עובד בענף אחר
+
+env:
+  # נתיבים בפרויקט
+  FRONT_DIR: course-site-with-nodejs-backend/course-site
+  BACK_DIR:  course-site-with-nodejs-backend/server-nodejs
+
+  # יעדים ב-EC2
+  WEB_ROOT: /var/www/html            # Apache משרת React build
+  APP_DIR: /home/ec2-user/app        # קוד Node
+
+  # ‎Secrets (מוגדרים ב-GitHub Settings → Secrets → Actions)
+  HOST: ${{ secrets.EC2_HOST }}
+  USER: ${{ secrets.EC2_USER }}
+  KEY:  ${{ secrets.EC2_SSH_KEY }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: ⬇️ Checkout
+      uses: actions/checkout@v4
+
+    # ---------- Front-end ----------
+    - name: 📦 Install & Build React
+      working-directory: ${{ env.FRONT_DIR }}
+      run: |
+        npm ci
+        npm run build
+
+    # ---------- Back-end ----------
+    - name: 📦 Install Back-end deps
+      working-directory: ${{ env.BACK_DIR }}
+      run: npm ci
+
+    # ---------- Deploy Front-end ----------
+    - name: 🚀 Copy React build to EC2
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ env.HOST }}
+        username: ${{ env.USER }}
+        key: ${{ env.KEY }}
+        source: "${{ env.FRONT_DIR }}/build/*"
+        target: ${{ env.WEB_ROOT }}
+        strip_components: 4            # מסיר נתיבי-אב מיותרים
+
+    # ---------- Deploy Back-end ----------
+    - name: 🚀 Copy Back-end code to EC2
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ env.HOST }}
+        username: ${{ env.USER }}
+        key: ${{ env.KEY }}
+        source: "${{ env.BACK_DIR }}/*"
+        target: ${{ env.APP_DIR }}
+        strip_components: 4
+
+    - name: 🔄 Install deps & (re)start Node on EC2
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ env.HOST }}
+        username: ${{ env.USER }}
+        key: ${{ env.KEY }}
+        script: |
+          cd $APP_DIR
+          npm ci --production
+          # PM2 כ-Process Manager
+          if ! command -v pm2 &> /dev/null; then
+            sudo npm install -g pm2
+          fi
+          pm2 startOrRestart ecosystem.config.js --name course-api || \
+          pm2 start server.js --name course-api
+          pm2 save
+          # רענון Apache שיטפל בבילד החדש
+          sudo systemctl reload httpd
